@@ -313,8 +313,10 @@ static void update(void *arg, long period) {
 		old_vel[i] = new_vel;
 		/* calculate new velocity cmd */
 		s8 send_vel;
-		send_vel= (s8) new_vel;
-		update_velocity(i, (new_vel * VELSCALE));
+		send_vel= (s8) (new_vel*VELSCALE);
+		update_velocity(i, send_vel);
+		rtapi_print_msg(RTAPI_MSG_ERR,"new speed %hhi \n",send_vel);
+
 	}
 
 
@@ -337,7 +339,10 @@ static void update(void *arg, long period) {
 		accum[i] += accum_diff;
 
 		*(spi->position_fb[i]) = (float)(accum[i]) * scale_inv[i];
+		rtapi_print_msg(RTAPI_MSG_ERR," new pos read: %lli\n",accum[i]);
+
 	}
+
 
 }
 
