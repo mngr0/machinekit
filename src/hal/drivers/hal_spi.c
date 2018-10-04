@@ -66,7 +66,6 @@ static const char *prefix = PREFIX;
 volatile unsigned *gpio, *spi;
 
 volatile int8_t txBuf[BUFSIZE], rxBuf[BUFSIZE];
-static u32 pwm_period = 0;
 
 static double dt = 0,				/* update_freq period in seconds */
 	      recip_dt = 0,			/* reciprocal of period, avoids divides */
@@ -201,7 +200,6 @@ void rtapi_app_exit(void) {
 static void update(void *arg, long period) {
 	int i;
 	spi_data_t *spi = (spi_data_t *)arg;
-	float duty;
 	double max_accl, vel_cmd, dv, new_vel,
 	       dp, pos_cmd, curr_pos, match_accl, match_time, avg_v,
 	       est_out, est_cmd, est_err;
