@@ -27,9 +27,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-#include "hal_spi.h"
-
-#include "cpuinfo.c"
+#include "hal_spi_sg.h"
 
 #if !defined(BUILD_SYS_USER_DSO)
 #error "This driver is for usermode threads only"
@@ -39,7 +37,7 @@
 #error "This driver is for the Raspberry Pi platform only"
 #endif
 
-#define MODNAME "hal_spi"
+#define MODNAME "hal_spi_sg"
 #define PREFIX "spi"
 
 MODULE_AUTHOR("GP Orcullo");
@@ -49,12 +47,19 @@ MODULE_LICENSE("GPL v2");
 static int stepwidth = 1;
 RTAPI_MP_INT(stepwidth, "Step width in 1/BASEFREQ");
 
+static long pwmfreq = 1000;
+RTAPI_MP_LONG(pwmfreq, "PWM frequency in Hz");
+
 typedef struct {
 	hal_float_t *position_cmd[NUMAXES],
 	            *position_fb[NUMAXES],
-	hal_bit_t   *ready;
+	            *pwm_duty;
+	hal_bit_t   *pin_out[5],
+	            *pin_in[5],
+	            *ready;
 	hal_float_t scale[NUMAXES],
 	            maxaccel[NUMAXES],
+	            pwm_scale;
 } spi_data_t;
 
 static spi_data_t *spi_data;
@@ -65,7 +70,7 @@ static const char *prefix = PREFIX;
 
 volatile unsigned *gpio, *spi;
 
-volatile int8_t txBuf[BUFSIZE], rxBuf[BUFSIZE];
+volatile int32_t txBuf[BUFSIZE], rxBuf[BUFSIZE+1];
 static u32 pwm_period = 0;
 
 static double dt = 0,				/* update_freq period in seconds */
@@ -76,38 +81,22 @@ static double dt = 0,				/* update_freq period in seconds */
 	      old_scale[NUMAXES] = { 0 },
 	      max_vel;
 static long old_dtns = 0;			/* update_freq funct period in nsec */
-static s8 accum_diff = 0,
+static s32 accum_diff = 0,
            old_count[NUMAXES] = { 0 };
 static s64 accum[NUMAXES] = { 0 };		/* 64 bit DDS accumulator */
 
 static void read_spi(void *arg, long period);
+static void write_spi(void *arg, long period);
 static void update(void *arg, long period);
 void transfer_data();
 static void reset_board();
 static int map_gpio();
 static void setup_gpio();
 static void restore_gpio();
-static int number_of_cores();
 
-int rtapi_app_main(void)
-{
-char name[HAL_NAME_LEN + 1];
-int n, retval, ncores, rev;
-
-	// check what the board is
-	// RPi v3 > have different base address
-	ncores = number_of_cores();
-	if ((rev = get_rpi_revision()) < 0)
-    	    {
-	    rtapi_print_msg(RTAPI_MSG_ERR,
-		"unrecognized Raspberry revision, see /proc/cpuinfo\n");
-	    return -1;
-	    }
-
-	if (rev <= 2 || ncores <= 2)
-	    BCM2835_PERI_BASE = 0x20000000;
-	else
-	    BCM2835_PERI_BASE = 0x3F000000;
+int rtapi_app_main(void) {
+	char name[HAL_NAME_LEN + 1];
+	int n, retval;
 
 	/* initialise driver */
 	comp_id = hal_init(modname);
@@ -126,7 +115,6 @@ int n, retval, ncores, rev;
 		return -1;
 	}
 
-
 	/* configure board */
 	retval = map_gpio();
 	if (retval < 0) {
@@ -138,8 +126,14 @@ int n, retval, ncores, rev;
 	setup_gpio();
 	reset_board();
 
+	pwm_period = (40000000ul/pwmfreq) - 1;	/* PeripheralClock/pwmfreq - 1 */
+
+	txBuf[0] = 0x4746433E;			/* this is config data (>CFG) */
+	txBuf[1] = stepwidth;
+	txBuf[2] = pwm_period;
+	transfer_data();			/* send config data */
+
 	max_vel = BASEFREQ/(2.0 * stepwidth);	/* calculate velocity limit */
-  // max_vel = 255 ???
 
 	/* export pins and parameters */
 	for (n=0; n<NUMAXES; n++) {
@@ -164,10 +158,16 @@ int n, retval, ncores, rev;
 		spi_data->maxaccel[n] = 1.0;
 	}
 
+
+
+
+
 	retval = hal_pin_bit_newf(HAL_OUT, &(spi_data->ready), comp_id,
 	        "%s.ready", prefix);
 	if (retval < 0) goto error;
 	*(spi_data->ready) = 0;
+
+
 
 error:
 	if (retval < 0) {
@@ -187,7 +187,15 @@ error:
 		hal_exit(comp_id);
 		return -1;
 	}
-
+	rtapi_snprintf(name, sizeof(name), "%s.write", prefix);
+	/* no FP operations */
+	retval = hal_export_funct(name, write_spi, spi_data, 0, 0, comp_id);
+	if (retval < 0) {
+		rtapi_print_msg(RTAPI_MSG_ERR,
+		        "%s: ERROR: write function export failed\n", modname);
+		hal_exit(comp_id);
+		return -1;
+	}
 	rtapi_snprintf(name, sizeof(name), "%s.update", prefix);
 	retval = hal_export_funct(name, update, spi_data, 1, 0, comp_id);
 	if (retval < 0) {
@@ -212,6 +220,10 @@ void rtapi_app_exit(void) {
 static void read_spi(void *arg, long period) {
 	int i;
 	spi_data_t *spi = (spi_data_t *)arg;
+
+	/* skip loading velocity command */
+	txBuf[0] = 0x444D4300;
+
 	/* send request */
 	BCM2835_GPCLR0 = (1l << 14);
 
@@ -223,6 +235,12 @@ static void read_spi(void *arg, long period) {
 	/* clear request, active low */
 	BCM2835_GPSET0 = (1l << 14);
 
+	/* sanity check */
+	if (((u32)rxBuf[1] >> 8) == (rxBuf[BUFSIZE] & 0xffffff) &&
+		((u32)rxBuf[1] >> 8) == 0x444D43)	/* CMD */
+		*(spi->ready) = 1;
+	else
+		*(spi->ready) = 0;
 
 	/* check for change in period */
 	if (period != old_dtns) {
@@ -253,6 +271,16 @@ static void read_spi(void *arg, long period) {
 		*(spi->position_fb[i]) = (float)(accum[i]) * scale_inv[i];
 	}
 
+	/* update input status */
+	*(spi->pin_in[0]) = (get_inputs() & 0b000000100000) ? 1 : 0;
+	*(spi->pin_in[1]) = (get_inputs() & 0b000001000000) ? 1 : 0;
+	*(spi->pin_in[2]) = (get_inputs() & 0b000010000000) ? 1 : 0;
+	*(spi->pin_in[3]) = (get_inputs() & 0b000100000000) ? 1 : 0;
+	*(spi->pin_in[4]) = (get_inputs() & 0b001000000000) ? 1 : 0;
+}
+
+static void write_spi(void *arg, long period) {
+	transfer_data();
 }
 
 static void update(void *arg, long period) {
@@ -353,6 +381,29 @@ static void update(void *arg, long period) {
 		/* calculate new velocity cmd */
 		update_velocity(i, (new_vel * VELSCALE));
 	}
+
+	/* update rpi output, active low */
+	BCM2835_GPCLR0 = (*(spi->pin_out[3]) ? 1l : 0) << 23 ;	/* GPIO23 */
+	BCM2835_GPSET0 = (*(spi->pin_out[3]) ? 0 : 1l) << 23 ;
+	BCM2835_GPCLR0 = (*(spi->pin_out[4]) ? 1l : 0) << 24 ;	/* GPIO24 */
+	BCM2835_GPSET0 = (*(spi->pin_out[4]) ? 0 : 1l) << 24 ;
+
+	/* update pic32 output */
+	txBuf[1+NUMAXES] = (*(spi->pin_out[0]) ? 1l : 0) << 11 |
+	        (*(spi->pin_out[1]) ? 1l : 0) << 12 |
+	        (*(spi->pin_out[2]) ? 1l : 0) << 14 ;
+
+	/* update pwm */
+	duty = *spi->pwm_duty * spi->pwm_scale * 0.01;
+	if (duty < 0.0) duty = 0.0;
+	if (duty > 1.0) duty = 1.0;
+
+	duty = 1.0 - duty;		/* pwm output is active low */
+
+	txBuf[2+NUMAXES] = (duty * (1.0 + pwm_period));
+
+	/* this is a command (>CMD) */
+	txBuf[0] = 0x444D433E;
 }
 
 void transfer_data() {
@@ -375,7 +426,7 @@ void transfer_data() {
 	BCM2835_SPICS = SPI_CS_DONE;
 
 	/* read buffer */
-	buf = (char *)rxBuf;	/* ignore 1st byte and align data */
+	buf = (char *)rxBuf + 3;	/* ignore 1st byte and align data */
 	for (i=0; i<SPIBUFSIZE; i++) {
 		*buf++ = BCM2835_SPIFIFO;
 	}
@@ -534,23 +585,4 @@ void restore_gpio() {
 	x = BCM2835_GPFSEL1;
 	x &= ~(0b111 << (0*3) | 0b111 << (1*3));
 	BCM2835_GPFSEL1 = x;
-}
-
-int number_of_cores()
-{
-char str[256];
-int procCount = 0;
-FILE *fp;
-
-    if( (fp = fopen("/proc/cpuinfo", "r")) )
-	{
-	while(fgets(str, sizeof str, fp))
-	    if( !memcmp(str, "processor", 9) ) procCount++;
-	}
-    if ( !procCount )
-	{
-	rtapi_print_msg(RTAPI_MSG_ERR,"HAL_GPIO: Unable to get proc count. Defaulting to 2");
-	procCount = 2;
-	}
-    return procCount;
 }

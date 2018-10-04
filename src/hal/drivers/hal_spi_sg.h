@@ -19,10 +19,10 @@
 #define HAL_SPI_H
 
 #define SPICLKDIV		32		/* ~8 Mhz */
-#define NUMAXES			1		/* X*/
+#define NUMAXES			3		/* X Y Z */
 
-#define SPIBUFSIZE		NUMAXES		/* SPI buffer size */
-#define BUFSIZE			SPIBUFSIZE
+#define SPIBUFSIZE		32		/* SPI buffer size */
+#define BUFSIZE			(SPIBUFSIZE/4)
 
 #define STEPBIT			23		/* bit location in DDS accum */
 #define STEP_MASK		(1<<STEPBIT)
@@ -32,13 +32,13 @@
 #define VELSCALE		((double)(1L << STEPBIT) * PERIODFP)
 #define ACCELSCALE		(VELSCALE * PERIODFP)
 
-#define get_position(a)		(rxBuf[(a)])
-#define update_velocity(a, b)	(txBuf[(a)] = (b))
+#define get_position(a)		(rxBuf[2 + (a)])
+#define get_inputs()		(rxBuf[2 + NUMAXES])
+#define update_velocity(a, b)	(txBuf[1 + (a)] = (b))
 
 /* Broadcom defines */
 
-//#define BCM2835_PERI_BASE	0x20000000
-unsigned int BCM2835_PERI_BASE;
+#define BCM2835_PERI_BASE	0x20000000
 #define BCM2835_GPIO_BASE	(BCM2835_PERI_BASE + 0x200000) /* GPIO controller */
 #define BCM2835_SPI_BASE	(BCM2835_PERI_BASE + 0x204000) /* SPI controller */
 
