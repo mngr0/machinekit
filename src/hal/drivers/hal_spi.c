@@ -198,6 +198,7 @@ void rtapi_app_exit(void) {
 }
 
 static void update(void *arg, long period) {
+
 	int i;
 	spi_data_t *spi = (spi_data_t *)arg;
 	double max_accl, vel_cmd, dv, new_vel,
@@ -318,7 +319,7 @@ static void update(void *arg, long period) {
 	BCM2835_GPCLR0 = (1l << 14);
 
 	/* wait until ready, signal active low */
-	while (BCM2835_GPLEV0 & (1l << 15));
+	//while (BCM2835_GPLEV0 & (1l << 15));
 
 	transfer_data();
 
@@ -335,6 +336,7 @@ static void update(void *arg, long period) {
 
 		*(spi->position_fb[i]) = (float)(accum[i]) * scale_inv[i];
 	}
+
 }
 
 void transfer_data() {
@@ -361,6 +363,7 @@ void transfer_data() {
 	for (i=0; i<SPIBUFSIZE; i++) {
 		*buf++ = BCM2835_SPIFIFO;
 	}
+
 }
 
 void reset_board() {
