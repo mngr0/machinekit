@@ -136,8 +136,8 @@ int n, retval, ncores, rev;
 	setup_gpio();
 	reset_board();
 
-	max_vel = BASEFREQ/(2.0 * stepwidth);	/* calculate velocity limit */
-  // max_vel = 255 ???
+	//max_vel = BASEFREQ/(2.0 * stepwidth);	/* calculate velocity limit */
+   max_vel = 255;
 
 	/* export pins and parameters */
 	for (n=0; n<NUMAXES; n++) {
@@ -312,6 +312,8 @@ static void update(void *arg, long period) {
 
 		old_vel[i] = new_vel;
 		/* calculate new velocity cmd */
+		s8 send_vel;
+		send_vel= (s8) new_vel;
 		update_velocity(i, (new_vel * VELSCALE));
 	}
 
