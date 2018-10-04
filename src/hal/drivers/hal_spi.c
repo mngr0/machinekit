@@ -42,8 +42,8 @@
 #define MODNAME "hal_spi"
 #define PREFIX "spi"
 
-MODULE_AUTHOR("GP Orcullo");
-MODULE_DESCRIPTION("Driver for Raspberry Pi PICnc");
+MODULE_AUTHOR("mngr0");
+MODULE_DESCRIPTION("Raspberry spi driver");
 MODULE_LICENSE("GPL v2");
 
 static int stepwidth = 1;
@@ -80,7 +80,6 @@ static s8 accum_diff = 0,
            old_count[NUMAXES] = { 0 };
 static s64 accum[NUMAXES] = { 0 };		/* 64 bit DDS accumulator */
 
-static void read_spi(void *arg, long period);
 static void update(void *arg, long period);
 void transfer_data();
 static void reset_board();
@@ -178,16 +177,6 @@ error:
 		return -1;
 	}
 
-	/* export functions */
-	rtapi_snprintf(name, sizeof(name), "%s.read", prefix);
-	retval = hal_export_funct(name, read_spi, spi_data, 1, 0, comp_id);
-	if (retval < 0) {
-		rtapi_print_msg(RTAPI_MSG_ERR,
-		        "%s: ERROR: read function export failed\n", modname);
-		hal_exit(comp_id);
-		return -1;
-	}
-
 	rtapi_snprintf(name, sizeof(name), "%s.update", prefix);
 	retval = hal_export_funct(name, update, spi_data, 1, 0, comp_id);
 	if (retval < 0) {
@@ -209,52 +198,6 @@ void rtapi_app_exit(void) {
 	hal_exit(comp_id);
 }
 
-static void read_spi(void *arg, long period) {
-	int i;
-	spi_data_t *spi = (spi_data_t *)arg;
-	/* send request */
-	BCM2835_GPCLR0 = (1l << 14);
-
-	/* wait until ready, signal active low */
-	while (BCM2835_GPLEV0 & (1l << 15));
-
-	transfer_data();
-
-	/* clear request, active low */
-	BCM2835_GPSET0 = (1l << 14);
-
-
-	/* check for change in period */
-	if (period != old_dtns) {
-		old_dtns = period;
-		dt = period * 0.000000001;
-		recip_dt = 1.0 / dt;
-	}
-
-	/* check for scale change */
-	for (i = 0; i < NUMAXES; i++) {
-		if (spi->scale[i] != old_scale[i]) {
-			old_scale[i] = spi->scale[i];
-			/* scale must not be 0 */
-			if ((spi->scale[i] < 1e-20) && (spi->scale[i] > -1e-20))
-				spi->scale[i] = 1.0;
-			scale_inv[i] = (1.0 / (1L << STEPBIT)) / spi->scale[i];
-		}
-	}
-
-	/* update outputs */
-	for (i = 0; i < NUMAXES; i++) {
-		/* the DDS uses 32 bit counter, this code converts
-		   that counter into 64 bits */
-		accum_diff = get_position(i) - old_count[i];
-		old_count[i] = get_position(i);
-		accum[i] += accum_diff;
-
-		*(spi->position_fb[i]) = (float)(accum[i]) * scale_inv[i];
-	}
-
-}
-
 static void update(void *arg, long period) {
 	int i;
 	spi_data_t *spi = (spi_data_t *)arg;
@@ -262,6 +205,25 @@ static void update(void *arg, long period) {
 	double max_accl, vel_cmd, dv, new_vel,
 	       dp, pos_cmd, curr_pos, match_accl, match_time, avg_v,
 	       est_out, est_cmd, est_err;
+
+	 /* check for scale change */
+ 	for (i = 0; i < NUMAXES; i++) {
+ 		if (spi->scale[i] != old_scale[i]) {
+ 			old_scale[i] = spi->scale[i];
+ 			/* scale must not be 0 */
+ 			if ((spi->scale[i] < 1e-20) && (spi->scale[i] > -1e-20))
+ 				spi->scale[i] = 1.0;
+ 			scale_inv[i] = (1.0 / (1L << STEPBIT)) / spi->scale[i];
+ 		}
+ 	}
+
+	if (period != old_dtns) {
+		old_dtns = period;
+		dt = period * 0.000000001;
+		recip_dt = 1.0 / dt;
+	}
+
+
 
 	for (i = 0; i < NUMAXES; i++) {
 		/* set internal accel limit to its absolute max, which is
@@ -352,6 +314,28 @@ static void update(void *arg, long period) {
 		old_vel[i] = new_vel;
 		/* calculate new velocity cmd */
 		update_velocity(i, (new_vel * VELSCALE));
+	}
+
+
+	BCM2835_GPCLR0 = (1l << 14);
+
+	/* wait until ready, signal active low */
+	while (BCM2835_GPLEV0 & (1l << 15));
+
+	transfer_data();
+
+	/* clear request, active low */
+	BCM2835_GPSET0 = (1l << 14);
+
+
+	for (i = 0; i < NUMAXES; i++) {
+		/* the DDS uses 32 bit counter, this code converts
+			 that counter into 64 bits */
+		accum_diff = get_position(i) - old_count[i];
+		old_count[i] = get_position(i);
+		accum[i] += accum_diff;
+
+		*(spi->position_fb[i]) = (float)(accum[i]) * scale_inv[i];
 	}
 }
 
