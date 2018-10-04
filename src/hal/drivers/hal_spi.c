@@ -51,10 +51,10 @@ RTAPI_MP_INT(stepwidth, "Step width in 1/BASEFREQ");
 
 typedef struct {
 	hal_float_t *position_cmd[NUMAXES],
-	            *position_fb[NUMAXES],
+	            *position_fb[NUMAXES];
 	hal_bit_t   *ready;
 	hal_float_t scale[NUMAXES],
-	            maxaccel[NUMAXES],
+	            maxaccel[NUMAXES];
 } spi_data_t;
 
 static spi_data_t *spi_data;
